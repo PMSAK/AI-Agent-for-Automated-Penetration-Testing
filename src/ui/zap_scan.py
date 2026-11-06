@@ -17,9 +17,14 @@ def render_zap_scan() -> None:
         "No spidering, no crawling, no active attack payloads. Use only on authorized web targets."
     )
 
-    zap_avail = check_zap_availability(settings.zap_api_url, settings.zap_api_key, timeout=0.2)
+    zap_avail = check_zap_availability(settings.zap_api_url, settings.zap_api_key, timeout=1.0)
     if zap_avail["api_reachable"]:
         st.success(f"ZAP API connected at {settings.zap_api_url} (v{zap_avail['version']})")
+    elif zap_avail.get("auth_failed"):
+        st.error(
+            f"ZAP daemon is running at {settings.zap_api_url}, "
+            "but API authentication failed. Verify that ZAP_API_KEY in .env matches your ZAP API key."
+        )
     elif zap_avail["installed"]:
         st.info(
             f"ZAP is installed locally ({zap_avail['executable_path']}), "
@@ -77,3 +82,4 @@ def render_zap_scan() -> None:
             st.error(f"{result.status} [{result.error_code}]: {result.error}")
 
         st.json(result.as_dict())  # raw output omitted
+

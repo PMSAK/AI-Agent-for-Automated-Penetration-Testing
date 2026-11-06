@@ -29,11 +29,13 @@ def render() -> None:
     for name, found in check_scanner_availability().items():
         st.write(f"{'✅' if found else '⚠️'} {name}: {'found' if found else 'not found on PATH'}")
 
-    zap_avail = check_zap_availability(settings.zap_api_url, settings.zap_api_key, timeout=0.2)
+    zap_avail = check_zap_availability(settings.zap_api_url, settings.zap_api_key, timeout=1.0)
     if zap_avail["api_reachable"]:
         st.write(f"✅ zap: API reachable at {settings.zap_api_url} (v{zap_avail['version']})")
+    elif zap_avail.get("auth_failed"):
+        st.write(f"⚠️ zap: daemon is running at {settings.zap_api_url}, but API authentication failed (check ZAP_API_KEY in .env)")
     elif zap_avail["installed"]:
-        st.write(f"⚠️ zap: installed locally ({zap_avail['executable_path']}), but API daemon is not running on {settings.zap_api_url}")
+        st.write(f"⚠️ zap: installed locally ({zap_avail['executable_path']}), but daemon is not running on {settings.zap_api_url}")
     else:
         st.write(f"⚠️ zap: not detected on PATH or default directory; API not reachable on {settings.zap_api_url}")
 

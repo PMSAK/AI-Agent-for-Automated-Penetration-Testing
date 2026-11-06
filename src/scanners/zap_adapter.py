@@ -15,6 +15,7 @@ fetch alerts -> normalize. Alert URLs are data only and never extend scope.
 import json
 import logging
 import shutil
+import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,8 +68,17 @@ def _http_get(url, params, headers, timeout):
         return s.get(url, params=params, headers=headers, timeout=timeout, allow_redirects=False)
 
 
-def check_zap_availability(api_url: str = "http://127.0.0.1:8090", api_key: str = "", timeout: float = 0.2) -> dict:
-    """Check if ZAP is installed locally and/or its REST API daemon is reachable."""
+def _check_socket(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Helper to check if TCP port is open."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def check_zap_availability(api_url: str = "http://127.0.0.1:8090", api_key: str = "", timeout: float = 1.0) -> dict:
+    """Check if ZAP is installed locally and/or its REST API daemon is reachable and authenticated."""
     common_paths = [
         r"C:\Program Files\ZAP\Zed Attack Proxy\zap.bat",
         r"C:\Program Files\ZAP\Zed Attack Proxy\ZAP.exe",
@@ -83,24 +93,62 @@ def check_zap_availability(api_url: str = "http://127.0.0.1:8090", api_key: str 
                 exe = p
                 break
 
-    api_reachable, version, err = False, None, None
+    parsed = urlsplit(api_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    api_reachable, daemon_listening, auth_failed, version, err = False, False, False, None, None
     try:
         headers = {"X-ZAP-API-Key": api_key} if api_key else {}
         resp = _http_get(api_url.rstrip("/") + "/JSON/core/view/version/", {}, headers, timeout)
+        daemon_listening = True
         if resp.status_code == 200:
-            api_reachable = True
-            version = resp.json().get("version")
+            try:
+                data = resp.json()
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                version = data.get("version") or data.get("Version")
+                if version:
+                    api_reachable = True
+                else:
+                    err = f"Unexpected ZAP API response format: {resp.text[:100]}"
+            else:
+                err = f"Unexpected ZAP API response format: {resp.text[:100]}"
         elif resp.status_code in (401, 403):
-            err = "ZAP API key authentication failed"
+            auth_failed = True
+            err = f"ZAP API authentication failed (HTTP {resp.status_code})"
         else:
             err = f"ZAP API returned HTTP {resp.status_code}"
     except Exception as exc:
-        err = f"Cannot connect to ZAP API: {type(exc).__name__}"
+        exc_msg = str(exc).lower()
+        if "remotedisconnected" in exc_msg or "connection aborted" in exc_msg or "remote end closed connection" in exc_msg:
+            daemon_listening = True
+            auth_failed = True
+            err = "ZAP daemon closed connection without response (API key missing or rejected)"
+        elif "refused" in exc_msg or "failed to establish" in exc_msg or isinstance(exc, requests.exceptions.ConnectTimeout):
+            daemon_listening = False
+            auth_failed = False
+            err = f"Cannot connect to ZAP API at {api_url}: daemon unreachable"
+        else:
+            listening = _check_socket(host, port, timeout=min(0.5, timeout))
+            if listening:
+                daemon_listening = True
+                if isinstance(exc, requests.ConnectionError):
+                    auth_failed = True
+                    err = f"ZAP daemon rejected connection on {host}:{port} (check API key / TLS)"
+                else:
+                    err = f"Cannot connect to ZAP API: {type(exc).__name__}: {exc}"
+            else:
+                daemon_listening = False
+                err = f"Cannot connect to ZAP API at {api_url}: daemon unreachable"
 
     return {
         "installed": bool(exe),
         "executable_path": exe,
+        "daemon_listening": daemon_listening,
         "api_reachable": api_reachable,
+        "auth_failed": auth_failed,
         "version": version,
         "error": err,
     }
@@ -118,7 +166,11 @@ def _api(cfg: ZapConfig, path: str, params: dict, deadline: float) -> dict:
                         "Cannot connect to the ZAP API. Is the ZAP daemon running at the configured address?") from None
     except requests.Timeout:
         raise _ZapError(TIMED_OUT, "TIMEOUT", "ZAP API request timed out.") from None
-    except requests.ConnectionError:
+    except requests.ConnectionError as exc:
+        exc_msg = str(exc).lower()
+        if "remotedisconnected" in exc_msg or "connection aborted" in exc_msg or "remote end closed connection" in exc_msg:
+            raise _ZapError(FAILED, "ZAP_AUTH_FAILED",
+                            "ZAP daemon closed connection without response (check ZAP_API_KEY).") from None
         raise _ZapError(FAILED, "ZAP_UNAVAILABLE",
                         "Cannot connect to the ZAP API. Is the ZAP daemon running at the configured address?") from None
     except requests.RequestException as exc:

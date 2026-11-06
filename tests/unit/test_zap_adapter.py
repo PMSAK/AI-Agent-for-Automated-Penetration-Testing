@@ -373,7 +373,21 @@ def test_check_zap_availability_reachable(monkeypatch):
     monkeypatch.setattr(za, "_http_get", fake)
     status = check_zap_availability("http://127.0.0.1:8090", api_key="k")
     assert status["api_reachable"] is True
+    assert status["daemon_listening"] is True
+    assert status["auth_failed"] is False
     assert status["version"] == "2.17.0"
+    assert status["error"] is None
+
+
+def test_check_zap_availability_uppercase_version(monkeypatch):
+    fake = FakeSessionGet(responses={"/JSON/core/view/version/": FakeResponse({"Version": "2.17.0"})})
+    monkeypatch.setattr(za, "_http_get", fake)
+    status = check_zap_availability("http://127.0.0.1:8090", api_key="k")
+    assert status["api_reachable"] is True
+    assert status["daemon_listening"] is True
+    assert status["auth_failed"] is False
+    assert status["version"] == "2.17.0"
+    assert status["error"] is None
 
 
 def test_check_zap_availability_unreachable(monkeypatch):
@@ -381,5 +395,64 @@ def test_check_zap_availability_unreachable(monkeypatch):
     monkeypatch.setattr(za, "_http_get", fake)
     status = check_zap_availability("http://127.0.0.1:8090")
     assert status["api_reachable"] is False
+    assert status["daemon_listening"] is False
+    assert status["auth_failed"] is False
     assert status["version"] is None
     assert "Cannot connect" in status["error"]
+
+
+def test_check_zap_availability_auth_failed_http_401(monkeypatch):
+    fake = FakeSessionGet(responses={"/JSON/core/view/version/": FakeResponse(text="Unauthorized", status_code=401)})
+    monkeypatch.setattr(za, "_http_get", fake)
+    status = check_zap_availability("http://127.0.0.1:8090", api_key="wrong_key")
+    assert status["api_reachable"] is False
+    assert status["daemon_listening"] is True
+    assert status["auth_failed"] is True
+    assert status["version"] is None
+    assert "authentication failed" in status["error"].lower()
+
+
+def test_check_zap_availability_auth_failed_http_403(monkeypatch):
+    fake = FakeSessionGet(responses={"/JSON/core/view/version/": FakeResponse(text="Forbidden", status_code=403)})
+    monkeypatch.setattr(za, "_http_get", fake)
+    status = check_zap_availability("http://127.0.0.1:8090", api_key="wrong_key")
+    assert status["api_reachable"] is False
+    assert status["daemon_listening"] is True
+    assert status["auth_failed"] is True
+    assert status["version"] is None
+    assert "authentication failed" in status["error"].lower()
+
+
+def test_check_zap_availability_auth_failed_remote_disconnected(monkeypatch):
+    # Simulates ZAP terminating connection on missing or bad API key
+    fake = FakeSessionGet(raises=requests.ConnectionError("Connection aborted: RemoteDisconnected"))
+    monkeypatch.setattr(za, "_http_get", fake)
+    status = check_zap_availability("http://127.0.0.1:8090")
+    assert status["api_reachable"] is False
+    assert status["daemon_listening"] is True
+    assert status["auth_failed"] is True
+    assert status["version"] is None
+    assert "API key missing or rejected" in status["error"]
+
+
+def test_check_zap_availability_unexpected_response_shape(monkeypatch):
+    fake = FakeSessionGet(responses={"/JSON/core/view/version/": FakeResponse(data={"other_key": 123})})
+    monkeypatch.setattr(za, "_http_get", fake)
+    status = check_zap_availability("http://127.0.0.1:8090", api_key="k")
+    assert status["api_reachable"] is False
+    assert status["daemon_listening"] is True
+    assert status["auth_failed"] is False
+    assert status["version"] is None
+    assert "Unexpected ZAP API response format" in status["error"]
+
+
+def test_check_zap_availability_not_installed(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    monkeypatch.setattr("pathlib.Path.is_file", lambda _: False)
+    fake = FakeSessionGet(raises=requests.ConnectionError("Refused"))
+    monkeypatch.setattr(za, "_http_get", fake)
+    status = check_zap_availability("http://127.0.0.1:8090")
+    assert status["installed"] is False
+    assert status["executable_path"] is None
+    assert status["api_reachable"] is False
+
